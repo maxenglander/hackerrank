@@ -8,6 +8,7 @@ import java.util.*;
 import java.util.function.Predicate;
 import java.util.stream.IntStream;
 
+import static java.util.stream.Collectors.collectingAndThen;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 
@@ -222,13 +223,15 @@ public class BalancedForest {
         }
 
         Forest(List<Tree.Node> trees) {
-            this.trees = Collections.unmodifiableList(trees);
+            this.trees = trees.stream()
+                    .map(Tree.Nodes::newSnapshot)
+                    .collect(collectingAndThen(toList(), Collections::unmodifiableList));
         }
 
         Forest addTree(Tree.Node node) {
-            List<Tree.Node> newForest = new ArrayList<>(getTrees());
-            newForest.add(node);
-            return new Forest(newForest);
+            List<Tree.Node> trees = new ArrayList<>(getTrees());
+            trees.add(node);
+            return new Forest(trees);
         }
 
         Collection<Tree.Node> getTrees() {
@@ -246,6 +249,7 @@ public class BalancedForest {
     }
 
     static class ForestPlanner implements Tree.Traversal.Visitor<Tree.Node> {
+        Tree.Checkpoint checkpoint;
         Comparator<Forest> comparator;
         Tree.Cutter cutter;
         Set<Tree.Node.Id> exclusions;
@@ -255,12 +259,14 @@ public class BalancedForest {
         Forest plan;
         Tree.Node root;
 
-        ForestPlanner(Comparator<Forest> comparator,
+        ForestPlanner(Tree.Checkpoint checkpoint,
+                      Comparator<Forest> comparator,
                       Tree.Cutter cutter,
                       Collection<Tree.Node.Id> exclusions,
                       int maxCuts,
                       int numCuts,
                       Tree.Node root) {
+            this.checkpoint = checkpoint;
             this.comparator = comparator;
             this.cutter = cutter;
             this.exclusions = new HashSet<>(exclusions);
@@ -287,21 +293,20 @@ public class BalancedForest {
                 return Tree.Traversal.Control.CONTINUE;
             }
 
-            System.err.println(indentation + "Forest planner"
-                + ": root = " + root.toString()
-                + "; node = " + node.toString());
+            // We're making changes to the tree, so mark a checkpoint
+            checkpoint.mark();
 
-            List<Forest> plans = makePlans(node);
+            Tuple<Tree.Node, Tree.Node> cut = cutter.cut(root, node);
+
+            List<Forest> plans = makePlans(cut.first(), cut.second());
+
+            // After we finish making all of our plans,
+            // we can rollback changes we made to the tree.
+            checkpoint.rollback();
 
             plan = plans.stream()
-                    .peek(t -> {
-                        System.err.println(indentation + "   - " + t.toString());
-                    })
                     .min(comparator)
                     .get();
-
-            System.err.println(indentation + "Forest planner"
-                + ": selected plan = " + plan.toString());
 
             return Tree.Traversal.Control.CONTINUE;
         }
@@ -312,22 +317,23 @@ public class BalancedForest {
             return newC;
         }
 
-        static Forest plan(Comparator<Forest> comparator,
+        static Forest plan(Tree.Checkpoint checkpoint,
+                           Comparator<Forest> comparator,
                            Tree.Cutter cutter,
                            Collection<Tree.Node.Id> exclusions,
                            int maxCuts,
                            Tree.Node root) {
-            return plan(comparator, cutter, exclusions, maxCuts, 0, root);
+            return plan(checkpoint, comparator, cutter, exclusions, maxCuts, 0, root);
         }
 
-        static Forest plan(Comparator<Forest> comparator,
+        static Forest plan(Tree.Checkpoint checkpoint, Comparator<Forest> comparator,
                            Tree.Cutter cutter,
                            Collection<Tree.Node.Id> exclusions,
                            int maxCuts,
                            int numCuts,
                            Tree.Node root) {
             final ForestPlanner planner
-                    = new ForestPlanner(comparator, cutter, exclusions, maxCuts, numCuts, root);
+                    = new ForestPlanner(checkpoint, comparator, cutter, exclusions, maxCuts, numCuts, root);
             return planner.plan();
         }
 
@@ -336,26 +342,26 @@ public class BalancedForest {
             return this.plan;
         }
 
-        private List<Forest> makePlans(Tree.Node node) {
+        private List<Forest> makePlans(Tree.Node root, Tree.Node node) {
             ArrayList<Forest> plans = new ArrayList<>();
 
             plans.add(plan);
 
-            Tuple<Tree.Node, Tree.Node> cut = cutter.cut(root, node);
-            Forest plan0 = new Forest(cut.first(), cut.second());
+
+            Forest plan0 = new Forest(root, node);
 
             plans.add(plan0);
 
             // Can we make additional cuts?
             if(numCuts + 1 < maxCuts) {
-                Forest plan1 = plan(comparator, cutter,
+                Forest plan1 = plan(checkpoint, comparator, cutter,
                         combine(exclusions, node.getId()),
-                        maxCuts, numCuts + 1, cut.first()).addTree(cut.second());
+                        maxCuts, numCuts + 1, root).addTree(node);
                 plans.add(plan1);
 
-                Forest plan2 = plan(comparator, cutter,
+                Forest plan2 = plan(checkpoint, comparator, cutter,
                         Collections.emptyList(), maxCuts,
-                        numCuts + 1, node).addTree(cut.first());
+                        numCuts + 1, node).addTree(root);
                 plans.add(plan2);
             }
 
@@ -491,6 +497,53 @@ public class BalancedForest {
             }
         }
 
+        static class Checkpoint {
+            interface Listener {
+                void onMark(int mark);
+                void onRegister(int mark);
+                void onRollback(int mark);
+            }
+
+            Set<Listener> listeners;
+            int mark;
+
+            Checkpoint() {
+                listeners = new HashSet<>();
+                mark = 0;
+            }
+
+            int getMark() {
+                return mark;
+            }
+
+            void mark() {
+                mark++;
+
+                for(Listener listener : listeners) {
+                    listener.onMark(mark);
+                }
+            }
+
+            void register(Listener listener) {
+                this.listeners.add(listener);
+                listener.onRegister(mark);
+            }
+
+            void rollback() {
+                List<Listener> listeners = new ArrayList<>(this.listeners);
+
+                for(Listener listener : listeners) {
+                    listener.onRollback(mark);
+                }
+
+                mark--;
+            }
+
+            void unregister(Listener listener) {
+                this.listeners.remove(listener);
+            }
+        }
+
         interface Cutter {
             Tuple<Node, Node> cut(Tree.Node parent, Tree.Node descendent);
         }
@@ -511,31 +564,26 @@ public class BalancedForest {
                 static Node cloneAndSubtractPath(List<Node> pathToRoot, Node child) {
                     Node previousNode = child;
 
-                    for(Node original : pathToRoot) {
-                        Node.Id id = original.getId();
 
-                        int value = original.getValue() - child.getValue();
+                    for(Node node : pathToRoot) {
+                        int value = node.getValue() - child.getValue();
 
-                        final Node.Id childId = previousNode.getId();
-                        Predicate<Node> filter = n -> !n.getId().equals(childId);
-                        List<Node> children = original.getChildren()
-                                .stream()
-                                .filter(filter)
-                                .collect(toList());
-
-                        Node newNode = Nodes.newNode(id, value, children);
-
-                        if(previousNode != child) {
-                            newNode.addChild(previousNode);
+                        node.setValue(value);
+                        if(previousNode == child) {
+                            node.removeChild(child);
                         }
 
-                        previousNode = newNode;
+                        previousNode = node;
                     }
 
                     return previousNode;
                 }
 
                 static List<Node> getPathToRoot(Node child, Node root) {
+                    if(!child.hasParent()) {
+                        throw new IllegalArgumentException("Child " + child.toString() + " has no parent, and therefore no path to the root " + root.toString());
+                    }
+
                     Node currentNode = child;
                     List<Node> pathToRoot = new ArrayList<>();
 
@@ -550,7 +598,8 @@ public class BalancedForest {
                         currentNode = parent;
                     }
 
-                    throw new IllegalArgumentException("Child is not a descendant of root");
+                    throw new IllegalArgumentException("Child " + child.toString() + " is not a descendant of root " + root.toString()
+                            + "; child path = " + pathToRoot.stream().map(Node::toString).collect(joining(" => ")));
                 }
             }
 
@@ -560,7 +609,6 @@ public class BalancedForest {
         }
 
         interface Node extends Traversal.Traversable<Node> {
-
             class Id {
                 private final Integer value;
 
@@ -592,13 +640,131 @@ public class BalancedForest {
             Node getParent();
             int getValue();
             boolean hasParent();
-            boolean isDescendantOf(Node root);
+            void removeChild(Node previousNode);
             void setParent(Node parent);
             void setValue(int sum);
         }
 
         static class Nodes {
             private Nodes() {}
+
+
+            private static class CheckpointNode extends StandardNode implements Checkpoint.Listener {
+                int changeCount;
+                Checkpoint checkpoint;
+                boolean registeredWithCheckpoint;
+                Map<Integer, Node> snapshots;
+
+                CheckpointNode(Checkpoint checkpoint, Node.Id id) {
+                    super(id);
+                    this.checkpoint = checkpoint;
+                    changeCount++;
+                    registeredWithCheckpoint = false;
+                    snapshots = new HashMap<>();
+                }
+
+                public void addChild(Node child) {
+                    beforeChange();
+                    super.addChild(child);
+                }
+
+                private void beforeChange() {
+                    changeCount++;
+
+                    if(!registeredWithCheckpoint) {
+                        checkpoint.register(this);
+                        registeredWithCheckpoint = true;
+                    }
+                }
+
+                @Override
+                public void onMark(int mark) {
+                    takeSnapshot(mark);
+                }
+
+                @Override
+                public void onRegister(int mark) {
+                    takeSnapshot(mark);
+                }
+
+                @Override
+                public void onRollback(int mark) {
+                    restoreSnapshot(mark);
+
+                    if(this.snapshots.isEmpty()) {
+                        checkpoint.unregister(this);
+                        registeredWithCheckpoint = false;
+                    }
+
+                    changeCount = 0;
+                }
+
+
+                private void restoreSnapshot(int mark) {
+                    Node snapshot = snapshots.remove(mark);
+
+                    if(snapshot == null) {
+                        return;
+                    }
+
+                    setChildren(snapshot.getChildren());
+                    setValue(snapshot.getValue());
+
+                    Node currentParent = getParent();
+                    Node snapshotParent = snapshot.getParent();
+
+                    setParent(snapshot.getParent());
+                    if(snapshot.hasParent()) {
+                        snapshot.getParent().addChild(this);
+                    }
+                }
+
+                public void removeChild(Node child) {
+                    beforeChange();
+                    super.removeChild(child);
+                }
+
+                public void setParent(Node parent) {
+                    beforeChange();
+                    super.setParent(parent);
+                }
+
+                public void setValue(int value) {
+                    beforeChange();
+                    super.setValue(value);
+                }
+
+                private void takeSnapshot(int mark) {
+                    Node snapshot = Nodes.newSnapshot(this);
+
+                    snapshots.put(mark, snapshot);
+                }
+            }
+
+            private static class SnapshotNode extends StandardNode {
+                SnapshotNode(Node node) {
+                    super(node);
+                }
+
+                @Override
+                public void addChild(Node child) {
+                    throw new UnsupportedOperationException("Snapshot nodes cannot be changed");
+                }
+
+                public void removeChild(Node child) {
+                    throw new UnsupportedOperationException("Snapshot nodes cannot be changed");
+                }
+
+                @Override
+                public void setParent(Node parent) {
+                    throw new UnsupportedOperationException("Snapshot nodes cannot be changed");
+                }
+
+                @Override
+                public void setValue(int value) {
+                    throw new UnsupportedOperationException("Snapshot nodes cannot be changed");
+                }
+            }
 
             private static class StandardNode implements Node {
                 private final Id id;
@@ -607,7 +773,7 @@ public class BalancedForest {
                 int value;
 
                 StandardNode(Node node) {
-                    this(node.getId(), node.getValue(), node.getChildren());
+                    this(node.getId(), node.getValue(), node.getChildren(), node.getParent());
                 }
 
                 StandardNode(Id id) {
@@ -615,22 +781,28 @@ public class BalancedForest {
                 }
 
                 StandardNode(Id id, int value) {
-                    this(id, value, new ArrayList<>());
+                    this(id, value, Collections.emptyList());
                 }
 
                 StandardNode(Id id, int value, List<Node> children) {
+                    this(id, value, children, null);
+                }
+
+                StandardNode(Id id, int value, List<Node> children, Node parent) {
                     this.id = id;
                     this.value = value;
-                    this.children = children;
+                    this.children = new ArrayList<>(children);
+                    this.parent = parent;
                 }
 
                 public void addChild(Node child) {
                     child.setParent(this);
-                    children.add(child);
+                    if(!this.children.contains(child))
+                        children.add(child);
                 }
 
                 public List<Node> getChildren() {
-                    return children;
+                    return Collections.unmodifiableList(children);
                 }
 
                 public Id getId() {
@@ -653,16 +825,14 @@ public class BalancedForest {
                     return getParent() != null;
                 }
 
+                public void removeChild(Node child) {
+                    this.children.remove(child);
+                    child.setParent(null);
+                }
 
-                public boolean isDescendantOf(Node root) {
-                    Node parent = getParent();
-
-                    while(parent != null) {
-                        if(parent.getId().equals(root.getId())) return true;
-                        parent = parent.getParent();
-                    }
-
-                    return false;
+                protected void setChildren(List<Node> children) {
+                    this.children.clear();
+                    this.children.addAll(children);
                 }
 
                 public void setParent(Node parent) {
@@ -694,6 +864,14 @@ public class BalancedForest {
             static Node newNode(Node.Id id, int value, List<Node> children) {
                 return new StandardNode(id, value, children);
             }
+
+            static Node newSnapshot(Node node) {
+                return new SnapshotNode(node);
+            }
+
+            public static Node withCheckpoint(Checkpoint checkpoint, Node.Id id) {
+                return new CheckpointNode(checkpoint, id);
+            }
         }
 
         static class Printer implements Traversal.Visitor<Node> {
@@ -723,6 +901,30 @@ public class BalancedForest {
         static class Transformers {
             private Transformers() {}
 
+            static class CheckpointRegistrar implements Tree.Transformer {
+                Checkpoint checkpoint;
+
+                CheckpointRegistrar(Checkpoint checkpoint) {
+                    this.checkpoint = checkpoint;
+                }
+
+                @Override
+                public Node transform(Node node) {
+                    int sum = node.getValue();
+
+                    Tree.Node newNode = Tree.Nodes.withCheckpoint(checkpoint, node.getId());
+
+                    for(Tree.Node child : node.getChildren()) {
+                        Tree.Node newChild = transform(child);
+                        newNode.addChild(newChild);
+                    }
+
+                    newNode.setValue(node.getValue());
+
+                    return newNode;
+                }
+            }
+
             static class Summator implements Tree.Transformer {
                 @Override
                 public Tree.Node transform(Tree.Node node) {
@@ -740,6 +942,10 @@ public class BalancedForest {
 
                     return newNode;
                 }
+            }
+
+            public static Transformer withCheckpoint(Checkpoint checkpoint) {
+                return new CheckpointRegistrar(checkpoint);
             }
 
             static Transformer summing() {
@@ -807,7 +1013,16 @@ public class BalancedForest {
         // The value of each node is a sum of it's pre-transformation
         // value plus the sum of the post-transformation values of
         // each of its children.
-        Tree.Node sumTree = Tree.Transformers.summing().transform(originalTree);
+        Tree.Node sumTree = Tree.Transformers
+                .summing()
+                .transform(originalTree);
+
+        // As we analyze edges, we'll be making modifications to the tree.
+        // We'll take and restore snapshots as we make these modifications.
+        Tree.Checkpoint checkpoint = new Tree.Checkpoint();
+        Tree.Node snapshottableSumTree = Tree.Transformers
+                .withCheckpoint(checkpoint)
+                .transform(sumTree);
 
         originalTree.traverse(printer);
         sumTree.traverse(printer);
@@ -833,6 +1048,8 @@ public class BalancedForest {
 
         // Plan our forest:
         Forest forest = ForestPlanner.plan(
+                // Pass in our checkpoint manager
+                checkpoint,
                 // Pick the largest and most even forest
                 comparator,
                 // When we cut a branch into two, make sure to update the sums
@@ -841,7 +1058,7 @@ public class BalancedForest {
                 // Make up to two cuts (resulting in up to three trees)
                 2,
                 // Use our sum tree
-                sumTree);
+                snapshottableSumTree);
 
         System.err.println("Final forest: " + forest.toString());
 
