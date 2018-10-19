@@ -20,7 +20,7 @@ public class LuckBalance {
             totalLuck += luck;
 
             if(important) {
-                System.err.println("Adding luck value to priority queue: " + luck);
+                System.err.println("Adding luck getValue to priority queue: " + luck);
                 sortedLuckValuesOfImportantContests.add(luck);
             }
         }
@@ -31,7 +31,7 @@ public class LuckBalance {
 
         for(int i = 0; i < importantContestsToWin; i++) {
             Integer luck = sortedLuckValuesOfImportantContests.poll();
-            System.err.println("Deducting value from total luck: " + luck);
+            System.err.println("Deducting getValue from total luck: " + luck);
             totalLuck -= (2 * luck);
         }
 
