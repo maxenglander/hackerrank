@@ -48,14 +48,45 @@ public class BalancedForest {
                     int o1Size = o1.getTrees().size();
                     int o2Size = o2.getTrees().size();
 
-                    if(o1Size > o2Size) {
-                        return -1;
-                    }
-                    if(o2Size > o1Size) {
-                        return 1;
+                    return o2Size - o1Size;
+                }
+            }
+
+            /**
+             * Compactness here is defined as the amount that must be
+             * added to all trees to ensure they all have the same value.
+             * Here, zero is the maximum compactness.
+             */
+            private static class MostCompact implements Comparator<Forest> {
+                @Override
+                public int compare(Forest o1, Forest o2) {
+                    int o1Compactness = calculateCompactness(o1);
+                    int o2Compactness = calculateCompactness(o2);
+
+                    return o1Compactness - o2Compactness;
+                }
+
+                static int calculateCompactness(Forest forest) {
+                    List<Integer> valuesDesc
+                            = forest.getTrees()
+                                .stream()
+                                .map(Tree.Node::getValue)
+                                .sorted(Comparator.reverseOrder())
+                                .collect(toList());
+
+                    if(valuesDesc.isEmpty()) return 0;
+
+                    int compactness = 0;
+                    int largestNumber = valuesDesc.get(0);
+
+                    for(int i = 1; i < valuesDesc.size(); i++) {
+                        int value = valuesDesc.get(i);
+
+                        if(value < largestNumber)
+                            compactness += largestNumber - value;
                     }
 
-                    return 0;
+                    return compactness;
                 }
             }
 
@@ -65,6 +96,10 @@ public class BalancedForest {
 
             static Comparator<Forest> moreIsLess() {
                 return new MoreTrees();
+            }
+
+            static Comparator<Forest> mostCompact() {
+                return new MostCompact();
             }
         }
 
@@ -252,12 +287,21 @@ public class BalancedForest {
                 return Tree.Traversal.Control.CONTINUE;
             }
 
+            System.err.println(indentation + "Forest planner"
+                + ": root = " + root.toString()
+                + "; node = " + node.toString());
 
             List<Forest> plans = makePlans(node);
 
             plan = plans.stream()
+                    .peek(t -> {
+                        System.err.println(indentation + "   - " + t.toString());
+                    })
                     .min(comparator)
                     .get();
+
+            System.err.println(indentation + "Forest planner"
+                + ": selected plan = " + plan.toString());
 
             return Tree.Traversal.Control.CONTINUE;
         }
@@ -297,20 +341,21 @@ public class BalancedForest {
 
             plans.add(plan);
 
-            Tree.Node rootWithCut = cutter.cut(root, node);
-            Forest plan0 = new Forest(rootWithCut, node);
+            Tuple<Tree.Node, Tree.Node> cut = cutter.cut(root, node);
+            Forest plan0 = new Forest(cut.first(), cut.second());
+
             plans.add(plan0);
 
             // Can we make additional cuts?
             if(numCuts + 1 < maxCuts) {
                 Forest plan1 = plan(comparator, cutter,
                         combine(exclusions, node.getId()),
-                        maxCuts, numCuts + 1, rootWithCut).addTree(node);
+                        maxCuts, numCuts + 1, cut.first()).addTree(cut.second());
                 plans.add(plan1);
 
                 Forest plan2 = plan(comparator, cutter,
                         Collections.emptyList(), maxCuts,
-                        numCuts + 1, node).addTree(rootWithCut);
+                        numCuts + 1, node).addTree(cut.first());
                 plans.add(plan2);
             }
 
@@ -367,22 +412,29 @@ public class BalancedForest {
 
                 while(!adjacencyStack.isEmpty()) {
                     Tuple<Node.Id, List<Node.Id>> entry = adjacencyStack.pop();
-                    Node.Id parentId = entry.first();
+                    Node.Id nodeId = entry.first();
 
-                    if(visited[parentId.value()]) continue;
+                    if(visited[nodeId.value()]) continue;
+                    else visited[nodeId.value()] = true;
 
-                    visited[parentId.value()] = true;
-
-                    Node parent = nodeById.get(parentId);
+                    Node node = nodeById.get(nodeId);
                     List<Node.Id> childIds = entry.second();
 
-                    for(int i = childIds.size() - 1; i >= 0; i--) {
+                    for(int i = 0; i < childIds.size(); i++) {
                         Node.Id childId = childIds.get(i);
+
+                        if(childId.equals(nodeId)) continue;
+
                         Node childNode = nodeById.get(childId);
 
-                        adjacencyStack.push(Tuple.from(childId, childIdsByParentId.get(childId)));
+                        // Don't add parent as a child of itself
+                        adjacencyStack.push(Tuple.from(childId,
+                                childIdsByParentId.get(childId)
+                                    .stream()
+                                    .filter(id -> !id.equals(nodeId))
+                                    .collect(toList())));
 
-                        parent.addChild(childNode);
+                        node.addChild(childNode);
                     }
                 }
 
@@ -410,13 +462,7 @@ public class BalancedForest {
                     }
 
                     list0.add(n1);
-
-                    /**
-                     * Don't add the other side of the adjacency;
-                     * this allows us to turn an undirected graph
-                     * into a tree.
-                     */
-                    //list1.add(n0);
+                    list1.add(n0);
                 }
 
                 return childIdsByParentId;
@@ -446,7 +492,7 @@ public class BalancedForest {
         }
 
         interface Cutter {
-            Node cut(Tree.Node parent, Tree.Node descendent);
+            Tuple<Node, Node> cut(Tree.Node parent, Tree.Node descendent);
         }
 
         static class Cutters {
@@ -454,10 +500,57 @@ public class BalancedForest {
 
             static class ParentCloningAndChildValueSubtractingCutter implements Cutter {
                 @Override
-                public Node cut(Node parent, Node descendent) {
-                    Node clone = Nodes.newNode(parent);
-                    clone.setValue(clone.getValue() - descendent.getValue());
-                    return clone;
+                public Tuple<Node, Node> cut(Node root, Node child) {
+                    List<Node> pathToRoot = getPathToRoot(child, root);
+
+                    Node newRoot = cloneAndSubtractPath(pathToRoot, child);
+
+                    return Tuple.from(newRoot, child);
+                }
+
+                static Node cloneAndSubtractPath(List<Node> pathToRoot, Node child) {
+                    Node previousNode = child;
+
+                    for(Node original : pathToRoot) {
+                        Node.Id id = original.getId();
+
+                        int value = original.getValue() - child.getValue();
+
+                        final Node.Id childId = previousNode.getId();
+                        Predicate<Node> filter = n -> !n.getId().equals(childId);
+                        List<Node> children = original.getChildren()
+                                .stream()
+                                .filter(filter)
+                                .collect(toList());
+
+                        Node newNode = Nodes.newNode(id, value, children);
+
+                        if(previousNode != child) {
+                            newNode.addChild(previousNode);
+                        }
+
+                        previousNode = newNode;
+                    }
+
+                    return previousNode;
+                }
+
+                static List<Node> getPathToRoot(Node child, Node root) {
+                    Node currentNode = child;
+                    List<Node> pathToRoot = new ArrayList<>();
+
+                    while(currentNode.hasParent()) {
+                        Node parent = currentNode.getParent();
+                        pathToRoot.add(parent);
+
+                        if(parent.getId().equals(root.getId())) {
+                            return pathToRoot;
+                        }
+
+                        currentNode = parent;
+                    }
+
+                    throw new IllegalArgumentException("Child is not a descendant of root");
                 }
             }
 
@@ -467,6 +560,7 @@ public class BalancedForest {
         }
 
         interface Node extends Traversal.Traversable<Node> {
+
             class Id {
                 private final Integer value;
 
@@ -495,7 +589,11 @@ public class BalancedForest {
             void addChild(Node child);
             List<Node> getChildren();
             Id getId();
+            Node getParent();
             int getValue();
+            boolean hasParent();
+            boolean isDescendantOf(Node root);
+            void setParent(Node parent);
             void setValue(int sum);
         }
 
@@ -505,6 +603,7 @@ public class BalancedForest {
             private static class StandardNode implements Node {
                 private final Id id;
                 private final List<Node> children;
+                private Node parent;
                 int value;
 
                 StandardNode(Node node) {
@@ -526,6 +625,7 @@ public class BalancedForest {
                 }
 
                 public void addChild(Node child) {
+                    child.setParent(this);
                     children.add(child);
                 }
 
@@ -537,12 +637,36 @@ public class BalancedForest {
                     return id;
                 }
 
+                public Node getParent() {
+                    return parent;
+                }
+
                 public Node getSelf() {
                     return this;
                 }
 
                 public int getValue() {
                     return value;
+                }
+
+                public boolean hasParent() {
+                    return getParent() != null;
+                }
+
+
+                public boolean isDescendantOf(Node root) {
+                    Node parent = getParent();
+
+                    while(parent != null) {
+                        if(parent.getId().equals(root.getId())) return true;
+                        parent = parent.getParent();
+                    }
+
+                    return false;
+                }
+
+                public void setParent(Node parent) {
+                    this.parent = parent;
                 }
 
                 public void setValue(int value) {
@@ -565,6 +689,10 @@ public class BalancedForest {
 
             static Node newNode(Node.Id id, int value) {
                 return new StandardNode(id, value);
+            }
+
+            static Node newNode(Node.Id id, int value, List<Node> children) {
+                return new StandardNode(id, value, children);
             }
         }
 
@@ -665,6 +793,8 @@ public class BalancedForest {
     }
 
     static int balancedForest(int[] c, int[][] edges) {
+        Tree.Printer printer = new Tree.Printer(System.err);
+
         // Create tree
         Tree.Node originalTree = Tree.Builder.newBuilder()
                 .nodes(c)
@@ -679,6 +809,9 @@ public class BalancedForest {
         // each of its children.
         Tree.Node sumTree = Tree.Transformers.summing().transform(originalTree);
 
+        originalTree.traverse(printer);
+        sumTree.traverse(printer);
+
         // Create a balance evaluator
         Predicate<Forest> balanced
                 =      Forest.Predicates.atLeastNTrees(2)
@@ -691,7 +824,8 @@ public class BalancedForest {
         // First build our comparator components.
         Comparator<Forest> comparator
                 = Forest.Comparators.is(balanced)
-                         .thenComparing(Forest.Comparators.moreIsLess());
+                         .thenComparing(Forest.Comparators.moreIsLess()
+                         .thenComparing(Forest.Comparators.mostCompact()));
 
         // When we make a cut between a parent and descendant node,
         // subtract the value of the the descendant from that of the parent.
@@ -708,6 +842,8 @@ public class BalancedForest {
                 2,
                 // Use our sum tree
                 sumTree);
+
+        System.err.println("Final forest: " + forest.toString());
 
         if(!balanced.test(forest)) {
             return -1;
