@@ -354,15 +354,19 @@ public class BalancedForest {
 
             // Can we make additional cuts?
             if(numCuts + 1 < maxCuts) {
-                Forest plan1 = plan(checkpoint, comparator, cutter,
-                        combine(exclusions, node.getId()),
-                        maxCuts, numCuts + 1, root).addTree(node);
-                plans.add(plan1);
+                if(root.getValue() > node.getValue()) {
+                    Forest plan1 = plan(checkpoint, comparator, cutter,
+                            combine(exclusions, node.getId()),
+                            maxCuts, numCuts + 1, root).addTree(node);
+                    plans.add(plan1);
+                }
 
-                Forest plan2 = plan(checkpoint, comparator, cutter,
-                        Collections.emptyList(), maxCuts,
-                        numCuts + 1, node).addTree(root);
-                plans.add(plan2);
+                if(node.getValue() > root.getValue()) {
+                    Forest plan2 = plan(checkpoint, comparator, cutter,
+                            Collections.emptyList(), maxCuts,
+                            numCuts + 1, node).addTree(root);
+                    plans.add(plan2);
+                }
             }
 
             return plans;
@@ -426,9 +430,7 @@ public class BalancedForest {
                     Node node = nodeById.get(nodeId);
                     List<Node.Id> childIds = entry.second();
 
-                    for(int i = 0; i < childIds.size(); i++) {
-                        Node.Id childId = childIds.get(i);
-
+                    for(Node.Id childId : childIds) {
                         if(childId.equals(nodeId)) continue;
 
                         Node childNode = nodeById.get(childId);
@@ -510,10 +512,6 @@ public class BalancedForest {
             Checkpoint() {
                 listeners = new HashSet<>();
                 mark = 0;
-            }
-
-            int getMark() {
-                return mark;
             }
 
             void mark() {
@@ -635,7 +633,7 @@ public class BalancedForest {
             }
 
             void addChild(Node child);
-            List<Node> getChildren();
+            Collection<Node> getChildren();
             Id getId();
             Node getParent();
             int getValue();
@@ -710,9 +708,6 @@ public class BalancedForest {
                     setChildren(snapshot.getChildren());
                     setValue(snapshot.getValue());
 
-                    Node currentParent = getParent();
-                    Node snapshotParent = snapshot.getParent();
-
                     setParent(snapshot.getParent());
                     if(snapshot.hasParent()) {
                         snapshot.getParent().addChild(this);
@@ -768,7 +763,7 @@ public class BalancedForest {
 
             private static class StandardNode implements Node {
                 private final Id id;
-                private final List<Node> children;
+                private final Set<Node> children;
                 private Node parent;
                 int value;
 
@@ -784,25 +779,24 @@ public class BalancedForest {
                     this(id, value, Collections.emptyList());
                 }
 
-                StandardNode(Id id, int value, List<Node> children) {
+                StandardNode(Id id, int value, Collection<Node> children) {
                     this(id, value, children, null);
                 }
 
-                StandardNode(Id id, int value, List<Node> children, Node parent) {
+                StandardNode(Id id, int value, Collection<Node> children, Node parent) {
                     this.id = id;
                     this.value = value;
-                    this.children = new ArrayList<>(children);
+                    this.children = new HashSet<>(children);
                     this.parent = parent;
                 }
 
                 public void addChild(Node child) {
                     child.setParent(this);
-                    if(!this.children.contains(child))
-                        children.add(child);
+                    children.add(child);
                 }
 
-                public List<Node> getChildren() {
-                    return Collections.unmodifiableList(children);
+                public Collection<Node> getChildren() {
+                    return Collections.unmodifiableCollection(children);
                 }
 
                 public Id getId() {
@@ -830,7 +824,7 @@ public class BalancedForest {
                     child.setParent(null);
                 }
 
-                protected void setChildren(List<Node> children) {
+                void setChildren(Collection<Node> children) {
                     this.children.clear();
                     this.children.addAll(children);
                 }
@@ -849,10 +843,6 @@ public class BalancedForest {
                 }
             }
 
-            static Node newNode(Node node) {
-                return new StandardNode(node);
-            }
-
             static Node newNode(Node.Id id) {
                 return new StandardNode(id);
             }
@@ -861,15 +851,11 @@ public class BalancedForest {
                 return new StandardNode(id, value);
             }
 
-            static Node newNode(Node.Id id, int value, List<Node> children) {
-                return new StandardNode(id, value, children);
-            }
-
             static Node newSnapshot(Node node) {
                 return new SnapshotNode(node);
             }
 
-            public static Node withCheckpoint(Checkpoint checkpoint, Node.Id id) {
+            static Node withCheckpoint(Checkpoint checkpoint, Node.Id id) {
                 return new CheckpointNode(checkpoint, id);
             }
         }
@@ -910,8 +896,6 @@ public class BalancedForest {
 
                 @Override
                 public Node transform(Node node) {
-                    int sum = node.getValue();
-
                     Tree.Node newNode = Tree.Nodes.withCheckpoint(checkpoint, node.getId());
 
                     for(Tree.Node child : node.getChildren()) {
@@ -944,7 +928,7 @@ public class BalancedForest {
                 }
             }
 
-            public static Transformer withCheckpoint(Checkpoint checkpoint) {
+            static Transformer withCheckpoint(Checkpoint checkpoint) {
                 return new CheckpointRegistrar(checkpoint);
             }
 
@@ -962,7 +946,7 @@ public class BalancedForest {
 
             interface Traversable<T extends Traversable<T>> {
 
-                List<T> getChildren();
+                Collection<T> getChildren();
 
                 T getSelf();
 
@@ -982,8 +966,8 @@ public class BalancedForest {
                                 continue;
                         }
 
-                        for (int i = next.getChildren().size() - 1; i >= 0; i--) {
-                            stack.push(next.getChildren().get(i));
+                        for (T child : next.getChildren()) {
+                            stack.push(child);
                         }
                     }
                 }
@@ -998,7 +982,7 @@ public class BalancedForest {
         private Tree() {}
     }
 
-    static int balancedForest(int[] c, int[][] edges) {
+    private static int balancedForest(int[] c, int[][] edges) {
         Tree.Printer printer = new Tree.Printer(System.err);
 
         // Create tree
@@ -1024,8 +1008,8 @@ public class BalancedForest {
                 .withCheckpoint(checkpoint)
                 .transform(sumTree);
 
-        originalTree.traverse(printer);
-        sumTree.traverse(printer);
+        //originalTree.traverse(printer);
+        //sumTree.traverse(printer);
 
         // Create a balance evaluator
         Predicate<Forest> balanced
@@ -1045,6 +1029,8 @@ public class BalancedForest {
         // When we make a cut between a parent and descendant node,
         // subtract the value of the the descendant from that of the parent.
         Tree.Cutter cutAndUpdateSum = Tree.Cutters.parentCloningAndChildValueSubtracting();
+
+        System.err.println("Beginning to plan forest");
 
         // Plan our forest:
         Forest forest = ForestPlanner.plan(
